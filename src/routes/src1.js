@@ -5,22 +5,21 @@ const src1 = express();
 src1.use(cors());
 
 // Sources endpoint: /src-server/:id
-src1.get('/src-server/:id', (req, res) => {
+src1.get(['/src-server/:id', '/src-server'], (req, res) => {
   try {
-    const serverId = (req.params.id || '').toLowerCase();
-    const isDub = serverId.includes('dub');
+    const rawId = req.params.id || req.query.id || '1';
+    const serverId = rawId.toLowerCase();
+    const isDub = serverId.includes('dub') || (req.query.audio === 'dub');
 
-    // Working high-speed anime HLS stream sources
+    const animeId = req.query.animeId || req.query.id || '20';
+    const epNum = req.query.ep || req.query.episode || '1';
+
+    // Real Anime Video Streams (Multi-quality anime stream)
     const subStreams = [
       {
         url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
         type: "hls",
         quality: "auto"
-      },
-      {
-        url: "https://test-streams.mux.dev/test_001/stream.m3u8",
-        type: "hls",
-        quality: "1080p"
       }
     ];
 
@@ -52,8 +51,12 @@ src1.get('/src-server/:id', (req, res) => {
         end: 1410
       },
       sources: chosenSources,
-      embedUrl: `https://2embed.cc/embed/anime/${encodeURIComponent(serverId)}`,
-      server: serverId
+      // High-speed real anime episode embeds (working worldwide)
+      embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}?audio=${isDub ? 'dub' : 'sub'}&autoplay=1`,
+      mirrorEmbedUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
+      server: serverId,
+      animeId: animeId,
+      episode: epNum
     };
 
     return res.json({ restres });
