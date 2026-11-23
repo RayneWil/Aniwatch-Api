@@ -270,20 +270,35 @@ src1.get(['/src-server/:id', '/src-server'], async (req, res) => {
     const proto = req.protocol === 'https' || host.includes('render.com') ? 'https' : 'http';
     const baseUrl = `${proto}://${host}`;
 
+    const rawTracks = streamInfo && streamInfo.tracks && streamInfo.tracks.length > 0 ? streamInfo.tracks.map(t => ({
+      file: `${baseUrl}/api/hls-media?path=${encodeURIComponent(t.file)}&animeId=${animeId}&ep=${epNum}&lang=${lang}`,
+      label: t.label || 'English',
+      kind: t.kind || 'subtitles'
+    })) : [
+      {
+        file: "https://raw.githubusercontent.com/brouberol/subtitles/master/subtitles.vtt",
+        label: "English",
+        kind: "captions"
+      }
+    ];
+
+    const engExact = rawTracks.findIndex(t => t.label && t.label.trim().toLowerCase() === 'english');
+    const engPartial = rawTracks.findIndex(t => t.label && t.label.toLowerCase().includes('english'));
+    const engIdx = engExact !== -1 ? engExact : (engPartial !== -1 ? engPartial : -1);
+
+    const orderedTracks = [...rawTracks];
+    if (engIdx > 0) {
+      const [eng] = orderedTracks.splice(engIdx, 1);
+      orderedTracks.unshift(eng);
+    }
+
+    const finalTracks = orderedTracks.map((t, idx) => ({
+      ...t,
+      default: idx === 0
+    }));
+
     const restres = {
-      tracks: streamInfo && streamInfo.tracks && streamInfo.tracks.length > 0 ? streamInfo.tracks.map(t => ({
-        file: `${baseUrl}/api/hls-media?path=${encodeURIComponent(t.file)}&animeId=${animeId}&ep=${epNum}&lang=${lang}`,
-        label: t.label || 'English',
-        kind: t.kind || 'subtitles',
-        default: true
-      })) : [
-        {
-          file: "https://raw.githubusercontent.com/brouberol/subtitles/master/subtitles.vtt",
-          label: "English",
-          kind: "captions",
-          default: true
-        }
-      ],
+      tracks: finalTracks,
       intro: streamInfo?.intro || { start: 85, end: 105 },
       outro: streamInfo?.outro || { start: 1320, end: 1410 },
       // Direct 100% Ad-Free Native HLS Stream
