@@ -9,14 +9,14 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // In-memory cache for playlists (5 min TTL)
 const playlistCache = new Map();
 
-async function fetchStreamPlaylist(animeId, ep) {
-  const cacheKey = `${animeId}_${ep}`;
+async function fetchStreamPlaylist(animeId, ep, lang = 'sub') {
+  const cacheKey = `${animeId}_${ep}_${lang}`;
   const cached = playlistCache.get(cacheKey);
   if (cached && Date.now() - cached.time < 300000) {
     return cached.data;
   }
 
-  const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}`;
+  const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
   const htmlRes = await fetch(referer, {
     headers: { 'User-Agent': UA },
     signal: AbortSignal.timeout(8000)
@@ -45,47 +45,45 @@ async function fetchStreamPlaylist(animeId, ep) {
 
   let playlistText = masterText;
   if (masterText.includes('#EXT-X-STREAM-INF')) {
-    // Multi-variant master playlist: resolve sub-playlist
-    const subLine = masterText.split('\n').find(l => l.trim().startsWith('/media/'));
-    if (subLine) {
-      const subRes = await fetch('https://animeembed.com' + subLine.trim(), {
-        headers: { 'User-Agent': UA, 'Referer': referer },
-        signal: AbortSignal.timeout(8000)
-      });
-      const subText = await subRes.text();
-      if (subText.includes('#EXTM3U')) {
-        playlistText = subText;
+    // Multi-variant master playlist: rewrite variants so HLS.js sees all resolutions (1080p, 720p, 360p)!
+    playlistText = masterText.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('/media/')) {
+        return `/api/hls-variant?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
       }
-    }
+      return line;
+    }).join('\n');
+  } else {
+    // Single-variant playlist: rewrite directly to media chunks
+    playlistText = masterText.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('/media/')) {
+        return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
+      }
+      return line;
+    }).join('\n');
   }
 
-  // Rewrite segments to proxy through /api/hls-media
-  const rewritten = playlistText.split('\n').map(line => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('/media/')) {
-      return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}`;
-    }
-    return line;
-  }).join('\n');
-
   const result = {
-    playlist: rewritten,
+    playlist: playlistText,
     tracks: srcData.tracks || [],
     intro: srcData.intro || null,
     outro: srcData.outro || null,
-    embedUrl: referer
+    embedUrl: referer,
+    lang: lang
   };
 
   playlistCache.set(cacheKey, { time: Date.now(), data: result });
   return result;
 }
 
-// 1. Direct 100% Ad-Free Native HLS Stream Endpoint
+// 1. Direct 100% Ad-Free Native HLS Master Playlist (All Quality Levels: 1080p, 720p, 360p)
 src1.get(['/hls-stream/:animeId/:ep.m3u8', '/hls-stream/:animeId/:ep'], async (req, res) => {
   try {
     const animeId = req.params.animeId || '20';
     const ep = (req.params.ep || '1').replace('.m3u8', '');
-    const data = await fetchStreamPlaylist(animeId, ep);
+    const lang = req.query.lang || 'sub';
+    const data = await fetchStreamPlaylist(animeId, ep, lang);
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -98,37 +96,82 @@ src1.get(['/hls-stream/:animeId/:ep.m3u8', '/hls-stream/:animeId/:ep'], async (r
   }
 });
 
-// 2. High-Speed Media Segment Proxy (Streams TS Video Chunks & VTT Subtitles with zero ads)
+// 1.5 High-Speed Variant VOD Playlist (Rewrites Segments to /api/hls-media)
+src1.get('/hls-variant', async (req, res) => {
+  try {
+    const pathParam = req.query.path;
+    const animeId = req.query.animeId || '20';
+    const ep = req.query.ep || '1';
+    const lang = req.query.lang || 'sub';
+
+    if (!pathParam || !pathParam.startsWith('/media/')) {
+      return res.status(400).send('Invalid variant path');
+    }
+
+    const targetUrl = 'https://animeembed.com' + pathParam;
+    const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
+
+    const varRes = await fetch(targetUrl, {
+      headers: { 'User-Agent': UA, 'Referer': referer },
+      signal: AbortSignal.timeout(8000)
+    });
+    const varText = await varRes.text();
+    const rewrittenVar = varText.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('/media/')) {
+        return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
+      }
+      return line;
+    }).join('\n');
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    return res.send(rewrittenVar);
+  } catch (err) {
+    return res.status(502).send('Variant error: ' + err.message);
+  }
+});
+
+// 2. Ultra-Fast Media Segment Streamer (Zero in-memory delay using direct pipeline)
 src1.get('/hls-media', async (req, res) => {
   try {
     const path = req.query.path;
     const animeId = req.query.animeId || '20';
     const ep = req.query.ep || '1';
+    const lang = req.query.lang || 'sub';
+
     if (!path || !path.startsWith('/media/')) {
       return res.status(400).send('Invalid path');
     }
 
     const targetUrl = 'https://animeembed.com' + path;
-    const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}`;
+    const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
 
     const proxyRes = await fetch(targetUrl, {
       headers: {
         'User-Agent': UA,
         'Referer': referer
       },
-      signal: AbortSignal.timeout(12000)
+      signal: AbortSignal.timeout(15000)
     });
+
+    if (!proxyRes.ok) {
+      return res.status(proxyRes.status).send('Upstream error');
+    }
 
     const contentType = proxyRes.headers.get('content-type') || (path.includes('.vtt') ? 'text/vtt' : 'video/mp2t');
     res.setHeader('Content-Type', contentType);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=86400');
 
-    const arrayBuf = await proxyRes.arrayBuffer();
-    return res.end(Buffer.from(arrayBuf));
+    const { Readable } = require('stream');
+    return Readable.fromWeb(proxyRes.body).pipe(res);
   } catch (err) {
     console.error('Media proxy error:', err.message);
-    return res.status(502).send('Media chunk error: ' + err.message);
+    if (!res.headersSent) {
+      return res.status(502).send('Media chunk error: ' + err.message);
+    }
   }
 });
 
@@ -137,7 +180,8 @@ src1.get('/clean-player', async (req, res) => {
   try {
     const animeId = req.query.id || req.query.animeId || '20';
     const ep = req.query.ep || req.query.episode || '1';
-    const targetUrl = `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(ep)}`;
+    const lang = req.query.lang || 'sub';
+    const targetUrl = `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(ep)}?language=${lang}`;
 
     const response = await fetch(targetUrl, {
       headers: { 'User-Agent': UA },
@@ -179,10 +223,11 @@ src1.get(['/src-server/:id', '/src-server'], async (req, res) => {
     const rawId = req.params.id || req.query.id || '1';
     const animeId = req.query.animeId || req.query.id || '20';
     const epNum = req.query.ep || req.query.episode || '1';
+    const lang = req.query.lang || 'sub';
 
     let streamInfo = null;
     try {
-      streamInfo = await fetchStreamPlaylist(animeId, epNum);
+      streamInfo = await fetchStreamPlaylist(animeId, epNum, lang);
     } catch (e) {
       console.warn('Live stream resolution warning:', e.message);
     }
@@ -193,7 +238,7 @@ src1.get(['/src-server/:id', '/src-server'], async (req, res) => {
 
     const restres = {
       tracks: streamInfo && streamInfo.tracks && streamInfo.tracks.length > 0 ? streamInfo.tracks.map(t => ({
-        file: `${baseUrl}/api/hls-media?path=${encodeURIComponent(t.file)}&animeId=${animeId}&ep=${epNum}`,
+        file: `${baseUrl}/api/hls-media?path=${encodeURIComponent(t.file)}&animeId=${animeId}&ep=${epNum}&lang=${lang}`,
         label: t.label || 'English',
         kind: t.kind || 'subtitles',
         default: true
@@ -208,20 +253,21 @@ src1.get(['/src-server/:id', '/src-server'], async (req, res) => {
       intro: streamInfo?.intro || { start: 85, end: 105 },
       outro: streamInfo?.outro || { start: 1320, end: 1410 },
       // Direct 100% Ad-Free Native HLS Stream
-      streamUrl: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8`,
+      streamUrl: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8?lang=${lang}`,
       sources: [
         {
-          url: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8`,
+          url: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8?lang=${lang}`,
           isM3U8: true,
           quality: 'auto (1080p/800p)'
         }
       ],
       // Ad-Free Clean Player URL
-      cleanEmbedUrl: `${baseUrl}/api/clean-player?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
-      embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}`,
+      cleanEmbedUrl: `${baseUrl}/api/clean-player?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}&lang=${lang}`,
+      embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}?language=${lang}`,
       server: rawId,
       animeId: animeId,
-      episode: epNum
+      episode: epNum,
+      lang: lang
     };
 
     return res.json({ restres });
