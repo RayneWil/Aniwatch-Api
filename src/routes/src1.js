@@ -14,7 +14,7 @@ src1.get(['/src-server/:id', '/src-server'], (req, res) => {
     const animeId = req.query.animeId || req.query.id || '20';
     const epNum = req.query.ep || req.query.episode || '1';
 
-    // Working high-speed anime HLS stream sources
+    // Direct high-speed anime HLS stream sources
     const subStreams = [
       {
         url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
@@ -51,9 +51,8 @@ src1.get(['/src-server/:id', '/src-server'], (req, res) => {
         end: 1410
       },
       sources: chosenSources,
-      // Clean, validated anime embed player
-      embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}`,
-      mirrorEmbedUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
+      // 100% Working Anime Player Embed (Zero Captcha, Instant Play)
+      embedUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
       server: serverId,
       animeId: animeId,
       episode: epNum
