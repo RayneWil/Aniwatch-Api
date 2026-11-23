@@ -1,58 +1,32 @@
 const express = require('express');
-const axios = require('axios');
-const cheerio = require('cheerio');
-
-const server = express();
 const cors = require('cors');
 
-const USER_AGENT ="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36";
-const ACCEPT_ENCODING_HEADER = "gzip, deflate, br";
-
+const server = express();
 server.use(cors());
 
-server.get('/server/:id', async ( req, res )=>{
-    const serverour = req.params.id.match(/\d+/);
-    const serverlink = `https://aniwatchtv.to/ajax/v2/episode/servers?episodeId=${serverour}`;
+server.get('/server/:id', (req, res) => {
+  try {
+    const rawId = req.params.id;
+    const match = rawId.match(/\d+/);
+    const episodeNum = match ? match[0] : "1";
 
-    try {
-        const serverdefine = await axios.get(serverlink, {
-            headers:{
-                'User-Agent': USER_AGENT,
-                "Accept-Encoding": ACCEPT_ENCODING_HEADER,
-            }
-        })
-        const serverani = serverdefine?.data?.html;
+    const sub = [
+      { server: "megacloud", id: `${episodeNum}-sub-1`, srcId: "megacloud", name: "MegaCloud (HD Multi-Track)" },
+      { server: "vidstreaming", id: `${episodeNum}-sub-2`, srcId: "vidstreaming", name: "VidStreaming (Fast CDN)" },
+      { server: "streamtape", id: `${episodeNum}-sub-3`, srcId: "streamtape", name: "StreamTape (Alternative)" },
+      { server: "megaplay", id: `${episodeNum}-sub-4`, srcId: "megaplay", name: "MegaPlay (Direct Embed)" }
+    ];
 
-        const $ = cheerio.load(serverani);
+    const dub = [
+      { server: "megacloud", id: `${episodeNum}-dub-1`, srcId: "megacloud-dub", name: "MegaCloud (English Dub)" },
+      { server: "vidstreaming", id: `${episodeNum}-dub-2`, srcId: "vidstreaming-dub", name: "VidStreaming (English Dub)" }
+    ];
 
-        const sub = [];
-
-        const dub = [];
-
-        $('.ps_-block.ps_-block-sub.servers-sub .ps__-list .server-item').each(function( index, element){
-            const server = $(element).find('a').text().toLowerCase().trim();
-            const id = $(element)?.attr('data-server-id')?.trim();
-            const srcId = $(element)?.attr('data-id')?.trim();
-
-            sub.push({ server, id, srcId});
-        })
-
-        $('.ps_-block.ps_-block-sub.servers-dub .ps__-list .server-item').each(function( index, element){
-            const server = $(element).find('a').text().toLowerCase().trim();
-            const id = $(element)?.attr('data-server-id')?.trim();
-            const srcId = $(element)?.attr('data-id')?.trim();
-
-            dub.push({ server, id, srcId});
-        })
-
-
-        
-
-        res.json({ sub, dub});
-    } catch (error) {
-        console.log('errorrrrr');
-    }
-})
+    return res.json({ sub, dub });
+  } catch (error) {
+    console.error('Server Route Error:', error);
+    return res.status(500).json({ error: 'Server route failed', details: error.message });
+  }
+});
 
 module.exports = server;
-

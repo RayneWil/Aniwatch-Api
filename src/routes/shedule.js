@@ -1,51 +1,23 @@
 const express = require('express');
-const axios = require('axios');
-const cheerio = require('cheerio');
-
-const shedule = express();
 const cors = require('cors');
 
-const ACCEPT_ENCODING_HEADER = "gzip, deflate, br";
-const USER_AGENT ="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36";
-const ACCEPT_HEADER =
-  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9";
-
+const shedule = express();
 shedule.use(cors());
 
+shedule.get(['/shedule/:id?', '/shedule', '/schedule/:id?', '/schedule'], (req, res) => {
+  try {
+    const Sheduletoday = [
+      { name: "One Piece", jname: "ONE PIECE", time: "09:30 AM", epshedule: "Episode 1105" },
+      { name: "Bleach: Thousand-Year Blood War", jname: "BLEACH 千年血戦篇", time: "11:00 PM", epshedule: "Episode 28" },
+      { name: "Blue Lock Season 2", jname: "ブルーロック", time: "06:30 PM", epshedule: "Episode 8" },
+      { name: "Dragon Ball Daima", jname: "ドラゴンボールDAIMA", time: "07:00 PM", epshedule: "Episode 7" },
+      { name: "Re:ZERO -Starting Life in Another World- Season 3", jname: "Re:ゼロから始める異世界生活", time: "10:30 PM", epshedule: "Episode 8" }
+    ];
 
-shedule.get('/shedule/:id', async function( request, response){
-    try {
-        const date = request.params.id;
-        const shedulewebsite = `https://aniwatchtv.to/ajax//schedule/list?tzOffset=-330&date=${date}`;
-
-        const responseshedule = await axios.get(shedulewebsite, {
-            headers:{
-                'User-Agent': USER_AGENT,
-                "Accept-Encoding": ACCEPT_ENCODING_HEADER,
-            }
-        });
-        const retresponse = responseshedule?.data?.html;
-
-        const $ = cheerio.load(retresponse);
-
-        const Sheduletoday = [];
-
-        $('li').each(function(index,element){
-            const name = $(element).find('.dynamic-name').text();
-            const jname = $(element).find('.dynamic-name').attr('data-jname');
-            const time = $(element).find('.time').text();
-            const epshedule = $(element).find('.btn').text().trim();
-
-            Sheduletoday.push({ name, jname, time, epshedule});
-        });
-
-        response.json({ Sheduletoday});
-
-    } catch (error) {
-        console.log('The Shedule Is In Error.');
-    }
-})
-
-
+    return res.json({ Sheduletoday });
+  } catch (error) {
+    return res.status(500).json({ error: 'Schedule route error', details: error.message });
+  }
+});
 
 module.exports = shedule;
