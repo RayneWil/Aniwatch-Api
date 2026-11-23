@@ -33,24 +33,34 @@ async function fetchStreamPlaylist(animeId, ep) {
   const srcData = await srcRes.json();
   if (!srcData.source) throw new Error('Stream source unavailable');
 
-  // Master playlist
+  // Fetch playlist
   const masterRes = await fetch('https://animeembed.com' + srcData.source, {
     headers: { 'User-Agent': UA, 'Referer': referer },
     signal: AbortSignal.timeout(8000)
   });
   const masterText = await masterRes.text();
-  const subLine = masterText.split('\n').find(l => l.trim().startsWith('/media/'));
-  if (!subLine) throw new Error('Stream variant not found');
+  if (!masterText.includes('#EXTM3U')) {
+    throw new Error('Invalid playlist response: ' + masterText.slice(0, 100));
+  }
 
-  // Sub playlist (VOD segments)
-  const subRes = await fetch('https://animeembed.com' + subLine.trim(), {
-    headers: { 'User-Agent': UA, 'Referer': referer },
-    signal: AbortSignal.timeout(8000)
-  });
-  const subText = await subRes.text();
+  let playlistText = masterText;
+  if (masterText.includes('#EXT-X-STREAM-INF')) {
+    // Multi-variant master playlist: resolve sub-playlist
+    const subLine = masterText.split('\n').find(l => l.trim().startsWith('/media/'));
+    if (subLine) {
+      const subRes = await fetch('https://animeembed.com' + subLine.trim(), {
+        headers: { 'User-Agent': UA, 'Referer': referer },
+        signal: AbortSignal.timeout(8000)
+      });
+      const subText = await subRes.text();
+      if (subText.includes('#EXTM3U')) {
+        playlistText = subText;
+      }
+    }
+  }
 
   // Rewrite segments to proxy through /api/hls-media
-  const rewritten = subText.split('\n').map(line => {
+  const rewritten = playlistText.split('\n').map(line => {
     const trimmed = line.trim();
     if (trimmed.startsWith('/media/')) {
       return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}`;
