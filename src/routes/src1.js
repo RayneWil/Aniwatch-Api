@@ -9,72 +9,80 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // In-memory cache for playlists (5 min TTL)
 const playlistCache = new Map();
 
-async function fetchStreamPlaylist(animeId, ep, lang = 'sub') {
+async function fetchStreamPlaylist(animeId, ep, lang = 'sub', retry = 0) {
   const cacheKey = `${animeId}_${ep}_${lang}`;
   const cached = playlistCache.get(cacheKey);
   if (cached && Date.now() - cached.time < 300000) {
     return cached.data;
   }
 
-  const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
-  const htmlRes = await fetch(referer, {
-    headers: { 'User-Agent': UA },
-    signal: AbortSignal.timeout(8000)
-  });
-  const htmlText = await htmlRes.text();
-  const configMatch = htmlText.match(/<script type="application\/json" id="config">([\s\S]*?)<\/script>/);
-  if (!configMatch) throw new Error('Embed config not found');
-  const config = JSON.parse(configMatch[1]);
+  try {
+    const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
+    const htmlRes = await fetch(referer, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(8000)
+    });
+    const htmlText = await htmlRes.text();
+    const configMatch = htmlText.match(/<script type="application\/json" id="config">([\s\S]*?)<\/script>/);
+    if (!configMatch) throw new Error('Embed config not found');
+    const config = JSON.parse(configMatch[1]);
 
-  const srcRes = await fetch(`https://animeembed.com/internal/source?session=${encodeURIComponent(config.session)}&server=1`, {
-    headers: { 'User-Agent': UA, 'Referer': referer },
-    signal: AbortSignal.timeout(8000)
-  });
-  const srcData = await srcRes.json();
-  if (!srcData.source) throw new Error('Stream source unavailable');
+    const srcRes = await fetch(`https://animeembed.com/internal/source?session=${encodeURIComponent(config.session)}&server=1`, {
+      headers: { 'User-Agent': UA, 'Referer': referer },
+      signal: AbortSignal.timeout(8000)
+    });
+    const srcData = await srcRes.json();
+    if (!srcData.source) throw new Error('Stream source unavailable');
 
-  // Fetch playlist
-  const masterRes = await fetch('https://animeembed.com' + srcData.source, {
-    headers: { 'User-Agent': UA, 'Referer': referer },
-    signal: AbortSignal.timeout(8000)
-  });
-  const masterText = await masterRes.text();
-  if (!masterText.includes('#EXTM3U')) {
-    throw new Error('Invalid playlist response: ' + masterText.slice(0, 100));
+    // Fetch playlist
+    const masterRes = await fetch('https://animeembed.com' + srcData.source, {
+      headers: { 'User-Agent': UA, 'Referer': referer },
+      signal: AbortSignal.timeout(8000)
+    });
+    const masterText = await masterRes.text();
+    if (!masterText.includes('#EXTM3U')) {
+      throw new Error('Invalid playlist response: ' + masterText.slice(0, 100));
+    }
+
+    let playlistText = masterText;
+    if (masterText.includes('#EXT-X-STREAM-INF')) {
+      // Multi-variant master playlist: rewrite variants so HLS.js sees all resolutions (1080p, 720p, 360p)!
+      playlistText = masterText.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('/media/')) {
+          return `/api/hls-variant?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
+        }
+        return line;
+      }).join('\n');
+    } else {
+      // Single-variant playlist: rewrite directly to media chunks
+      playlistText = masterText.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('/media/')) {
+          return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
+        }
+        return line;
+      }).join('\n');
+    }
+
+    const result = {
+      playlist: playlistText,
+      tracks: srcData.tracks || [],
+      intro: srcData.intro || null,
+      outro: srcData.outro || null,
+      embedUrl: referer,
+      lang: lang
+    };
+
+    playlistCache.set(cacheKey, { time: Date.now(), data: result });
+    return result;
+  } catch (err) {
+    if (retry < 1) {
+      await new Promise(r => setTimeout(r, 400));
+      return fetchStreamPlaylist(animeId, ep, lang, retry + 1);
+    }
+    throw err;
   }
-
-  let playlistText = masterText;
-  if (masterText.includes('#EXT-X-STREAM-INF')) {
-    // Multi-variant master playlist: rewrite variants so HLS.js sees all resolutions (1080p, 720p, 360p)!
-    playlistText = masterText.split('\n').map(line => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('/media/')) {
-        return `/api/hls-variant?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
-      }
-      return line;
-    }).join('\n');
-  } else {
-    // Single-variant playlist: rewrite directly to media chunks
-    playlistText = masterText.split('\n').map(line => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('/media/')) {
-        return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
-      }
-      return line;
-    }).join('\n');
-  }
-
-  const result = {
-    playlist: playlistText,
-    tracks: srcData.tracks || [],
-    intro: srcData.intro || null,
-    outro: srcData.outro || null,
-    embedUrl: referer,
-    lang: lang
-  };
-
-  playlistCache.set(cacheKey, { time: Date.now(), data: result });
-  return result;
 }
 
 // 1. Direct 100% Ad-Free Native HLS Master Playlist (All Quality Levels: 1080p, 720p, 360p)
