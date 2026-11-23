@@ -9,29 +9,9 @@ src1.get(['/src-server/:id', '/src-server'], (req, res) => {
   try {
     const rawId = req.params.id || req.query.id || '1';
     const serverId = rawId.toLowerCase();
-    const isDub = serverId.includes('dub') || (req.query.audio === 'dub');
 
     const animeId = req.query.animeId || req.query.id || '20';
     const epNum = req.query.ep || req.query.episode || '1';
-
-    // Direct high-speed anime HLS stream sources
-    const subStreams = [
-      {
-        url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
-        type: "hls",
-        quality: "auto"
-      }
-    ];
-
-    const dubStreams = [
-      {
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-        type: "mp4",
-        quality: "1080p"
-      }
-    ];
-
-    const chosenSources = isDub ? dubStreams : subStreams;
 
     const restres = {
       tracks: [
@@ -50,9 +30,10 @@ src1.get(['/src-server/:id', '/src-server'], (req, res) => {
         start: 1320,
         end: 1410
       },
-      sources: chosenSources,
-      // 100% Working Anime Player Embed (Zero Captcha, Instant Play)
-      embedUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
+      // Real Anime Video Players (AnimeEmbed & 2Embed)
+      embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}`,
+      mirrorUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
+      sources: [],
       server: serverId,
       animeId: animeId,
       episode: epNum
