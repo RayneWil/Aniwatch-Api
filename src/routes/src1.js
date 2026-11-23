@@ -46,22 +46,28 @@ async function fetchStreamPlaylist(animeId, ep, lang = 'sub', retry = 0) {
 
     let playlistText = masterText;
     if (masterText.includes('#EXT-X-STREAM-INF')) {
-      // Multi-variant master playlist: rewrite variants so HLS.js sees all resolutions (1080p, 720p, 360p)!
+      // Multi-variant master playlist: rewrite variants and audio tracks so HLS.js sees all resolutions and audios!
       playlistText = masterText.split('\n').map(line => {
-        const trimmed = line.trim();
+        let trimmed = line.trim();
+        trimmed = trimmed.replace(/URI="(\/media\/[^"]+)"/g, (match, p1) => {
+          return `URI="/api/hls-variant?path=${encodeURIComponent(p1)}&animeId=${animeId}&ep=${ep}&lang=${lang}"`;
+        });
         if (trimmed.startsWith('/media/')) {
           return `/api/hls-variant?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
         }
-        return line;
+        return trimmed;
       }).join('\n');
     } else {
       // Single-variant playlist: rewrite directly to media chunks
       playlistText = masterText.split('\n').map(line => {
-        const trimmed = line.trim();
+        let trimmed = line.trim();
+        trimmed = trimmed.replace(/URI="(\/media\/[^"]+)"/g, (match, p1) => {
+          return `URI="/api/hls-media?path=${encodeURIComponent(p1)}&animeId=${animeId}&ep=${ep}&lang=${lang}"`;
+        });
         if (trimmed.startsWith('/media/')) {
           return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
         }
-        return line;
+        return trimmed;
       }).join('\n');
     }
 
@@ -125,11 +131,14 @@ src1.get('/hls-variant', async (req, res) => {
     });
     const varText = await varRes.text();
     const rewrittenVar = varText.split('\n').map(line => {
-      const trimmed = line.trim();
+      let trimmed = line.trim();
+      trimmed = trimmed.replace(/URI="(\/media\/[^"]+)"/g, (match, p1) => {
+        return `URI="/api/hls-media?path=${encodeURIComponent(p1)}&animeId=${animeId}&ep=${ep}&lang=${lang}"`;
+      });
       if (trimmed.startsWith('/media/')) {
         return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}&lang=${lang}`;
       }
-      return line;
+      return trimmed;
     }).join('\n');
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -142,18 +151,18 @@ src1.get('/hls-variant', async (req, res) => {
 });
 
 // 2. Ultra-Fast Media Segment Streamer (Zero in-memory delay using direct pipeline)
-src1.get('/hls-media', async (req, res) => {
+src1.get(['/hls-media', '/media/*'], async (req, res) => {
   try {
-    const path = req.query.path;
+    const rawPath = req.query.path || req.path;
     const animeId = req.query.animeId || '20';
     const ep = req.query.ep || '1';
     const lang = req.query.lang || 'sub';
 
-    if (!path || !path.startsWith('/media/')) {
+    if (!rawPath || !rawPath.startsWith('/media/')) {
       return res.status(400).send('Invalid path');
     }
 
-    const targetUrl = 'https://animeembed.com' + path;
+    const targetUrl = 'https://animeembed.com' + rawPath;
     const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}?language=${lang}`;
 
     const proxyRes = await fetch(targetUrl, {
@@ -168,7 +177,24 @@ src1.get('/hls-media', async (req, res) => {
       return res.status(proxyRes.status).send('Upstream error');
     }
 
-    const contentType = proxyRes.headers.get('content-type') || (path.includes('.vtt') ? 'text/vtt' : 'video/mp2t');
+    const cType = proxyRes.headers.get('content-type') || '';
+    if (cType.includes('mpegurl') || cType.includes('application/x-mpegURL') || rawPath.endsWith('.m3u8')) {
+      const text = await proxyRes.text();
+      const rewritten = text.split('\n').map(line => {
+        let trimmed = line.trim();
+        trimmed = trimmed.replace(/URI="(\/media\/[^"]+)"/g, (m, p1) => `URI="/api/hls-variant?path=${encodeURIComponent(p1)}"`);
+        if (trimmed.startsWith('/media/')) {
+          return `/api/hls-media?path=${encodeURIComponent(trimmed)}`;
+        }
+        return trimmed;
+      }).join('\n');
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'no-cache');
+      return res.send(rewritten);
+    }
+
+    const contentType = cType || (rawPath.includes('.vtt') ? 'text/vtt' : 'video/mp2t');
     res.setHeader('Content-Type', contentType);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=86400');
