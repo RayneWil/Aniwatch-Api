@@ -1,0 +1,13 @@
+{
+  "name": "aniwatch-api",
+  "version": "1.0.0",
+  "description": "Aniwatch API - Fast, Resilient Anime Streaming API",
+  "main": "src/inde.js",
+  "scripts": {
+    "start": "node src/inde.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

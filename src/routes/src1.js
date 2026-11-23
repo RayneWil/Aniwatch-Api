@@ -4,17 +4,190 @@ const cors = require('cors');
 const src1 = express();
 src1.use(cors());
 
-// Sources endpoint: /src-server/:id
-src1.get(['/src-server/:id', '/src-server'], (req, res) => {
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// In-memory cache for playlists (5 min TTL)
+const playlistCache = new Map();
+
+async function fetchStreamPlaylist(animeId, ep) {
+  const cacheKey = `${animeId}_${ep}`;
+  const cached = playlistCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < 300000) {
+    return cached.data;
+  }
+
+  const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}`;
+  const htmlRes = await fetch(referer, {
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(8000)
+  });
+  const htmlText = await htmlRes.text();
+  const configMatch = htmlText.match(/<script type="application\/json" id="config">([\s\S]*?)<\/script>/);
+  if (!configMatch) throw new Error('Embed config not found');
+  const config = JSON.parse(configMatch[1]);
+
+  const srcRes = await fetch(`https://animeembed.com/internal/source?session=${encodeURIComponent(config.session)}&server=1`, {
+    headers: { 'User-Agent': UA, 'Referer': referer },
+    signal: AbortSignal.timeout(8000)
+  });
+  const srcData = await srcRes.json();
+  if (!srcData.source) throw new Error('Stream source unavailable');
+
+  // Master playlist
+  const masterRes = await fetch('https://animeembed.com' + srcData.source, {
+    headers: { 'User-Agent': UA, 'Referer': referer },
+    signal: AbortSignal.timeout(8000)
+  });
+  const masterText = await masterRes.text();
+  const subLine = masterText.split('\n').find(l => l.trim().startsWith('/media/'));
+  if (!subLine) throw new Error('Stream variant not found');
+
+  // Sub playlist (VOD segments)
+  const subRes = await fetch('https://animeembed.com' + subLine.trim(), {
+    headers: { 'User-Agent': UA, 'Referer': referer },
+    signal: AbortSignal.timeout(8000)
+  });
+  const subText = await subRes.text();
+
+  // Rewrite segments to proxy through /api/hls-media
+  const rewritten = subText.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('/media/')) {
+      return `/api/hls-media?path=${encodeURIComponent(trimmed)}&animeId=${animeId}&ep=${ep}`;
+    }
+    return line;
+  }).join('\n');
+
+  const result = {
+    playlist: rewritten,
+    tracks: srcData.tracks || [],
+    intro: srcData.intro || null,
+    outro: srcData.outro || null,
+    embedUrl: referer
+  };
+
+  playlistCache.set(cacheKey, { time: Date.now(), data: result });
+  return result;
+}
+
+// 1. Direct 100% Ad-Free Native HLS Stream Endpoint
+src1.get(['/hls-stream/:animeId/:ep.m3u8', '/hls-stream/:animeId/:ep'], async (req, res) => {
+  try {
+    const animeId = req.params.animeId || '20';
+    const ep = (req.params.ep || '1').replace('.m3u8', '');
+    const data = await fetchStreamPlaylist(animeId, ep);
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    return res.send(data.playlist);
+  } catch (err) {
+    console.error('HLS stream error:', err.message);
+    res.status(500).setHeader('Content-Type', 'text/plain');
+    return res.send('#EXTM3U\n# Error: ' + err.message);
+  }
+});
+
+// 2. High-Speed Media Segment Proxy (Streams TS Video Chunks & VTT Subtitles with zero ads)
+src1.get('/hls-media', async (req, res) => {
+  try {
+    const path = req.query.path;
+    const animeId = req.query.animeId || '20';
+    const ep = req.query.ep || '1';
+    if (!path || !path.startsWith('/media/')) {
+      return res.status(400).send('Invalid path');
+    }
+
+    const targetUrl = 'https://animeembed.com' + path;
+    const referer = `https://animeembed.com/embed/ani/${animeId}/${ep}`;
+
+    const proxyRes = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': referer
+      },
+      signal: AbortSignal.timeout(12000)
+    });
+
+    const contentType = proxyRes.headers.get('content-type') || (path.includes('.vtt') ? 'text/vtt' : 'video/mp2t');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+
+    const arrayBuf = await proxyRes.arrayBuffer();
+    return res.end(Buffer.from(arrayBuf));
+  } catch (err) {
+    console.error('Media proxy error:', err.message);
+    return res.status(502).send('Media chunk error: ' + err.message);
+  }
+});
+
+// 3. Clean Ad-Free & Popup-Free Iframe Player Proxy (Strips abscloud & neutralizes popups)
+src1.get('/clean-player', async (req, res) => {
+  try {
+    const animeId = req.query.id || req.query.animeId || '20';
+    const ep = req.query.ep || req.query.episode || '1';
+    const targetUrl = `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(ep)}`;
+
+    const response = await fetch(targetUrl, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(8000)
+    });
+    const rawHtml = await response.text();
+
+    const cleanHtml = rawHtml
+      .replace(/<head>/i, `<head>
+        <base href="https://animeembed.com/">
+        <style>
+          .ad-frame, .ad-dialog, .ad-interstitial, iframe[title="Advertisement"] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            width: 0 !important;
+            height: 0 !important;
+          }
+        </style>
+        <script>
+          window.open = function() { console.log('[AdBlock] Blocked popup'); return null; };
+          window.alert = function() {};
+          window.confirm = function() { return false; };
+        </script>`)
+      .replace(/"adScript"\s*:\s*"[^"]*"/g, '"adScript":""')
+      .replace(/<noscript>[\s\S]*?<\/noscript>/gi, '');
+
+    res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.send(cleanHtml);
+  } catch (err) {
+    return res.status(500).send('Error loading clean player: ' + err.message);
+  }
+});
+
+// 4. Primary Sources endpoint: /src-server/:id
+src1.get(['/src-server/:id', '/src-server'], async (req, res) => {
   try {
     const rawId = req.params.id || req.query.id || '1';
-    const serverId = rawId.toLowerCase();
-
     const animeId = req.query.animeId || req.query.id || '20';
     const epNum = req.query.ep || req.query.episode || '1';
 
+    let streamInfo = null;
+    try {
+      streamInfo = await fetchStreamPlaylist(animeId, epNum);
+    } catch (e) {
+      console.warn('Live stream resolution warning:', e.message);
+    }
+
+    const host = req.get('host') || 'aniwatch-api-6ekv.onrender.com';
+    const proto = req.protocol === 'https' || host.includes('render.com') ? 'https' : 'http';
+    const baseUrl = `${proto}://${host}`;
+
     const restres = {
-      tracks: [
+      tracks: streamInfo && streamInfo.tracks && streamInfo.tracks.length > 0 ? streamInfo.tracks.map(t => ({
+        file: `${baseUrl}/api/hls-media?path=${encodeURIComponent(t.file)}&animeId=${animeId}&ep=${epNum}`,
+        label: t.label || 'English',
+        kind: t.kind || 'subtitles',
+        default: true
+      })) : [
         {
           file: "https://raw.githubusercontent.com/brouberol/subtitles/master/subtitles.vtt",
           label: "English",
@@ -22,19 +195,21 @@ src1.get(['/src-server/:id', '/src-server'], (req, res) => {
           default: true
         }
       ],
-      intro: {
-        start: 85,
-        end: 105
-      },
-      outro: {
-        start: 1320,
-        end: 1410
-      },
-      // Real Anime Video Players (AnimeEmbed & 2Embed)
+      intro: streamInfo?.intro || { start: 85, end: 105 },
+      outro: streamInfo?.outro || { start: 1320, end: 1410 },
+      // Direct 100% Ad-Free Native HLS Stream
+      streamUrl: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8`,
+      sources: [
+        {
+          url: `${baseUrl}/api/hls-stream/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}.m3u8`,
+          isM3U8: true,
+          quality: 'auto (1080p/800p)'
+        }
+      ],
+      // Ad-Free Clean Player URL
+      cleanEmbedUrl: `${baseUrl}/api/clean-player?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
       embedUrl: `https://animeembed.com/embed/ani/${encodeURIComponent(animeId)}/${encodeURIComponent(epNum)}`,
-      mirrorUrl: `https://www.2embed.cc/embed/anime?id=${encodeURIComponent(animeId)}&ep=${encodeURIComponent(epNum)}`,
-      sources: [],
-      server: serverId,
+      server: rawId,
       animeId: animeId,
       episode: epNum
     };
