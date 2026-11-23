@@ -234,6 +234,20 @@ src1.get('/clean-player', async (req, res) => {
             width: 0 !important;
             height: 0 !important;
           }
+          video::-webkit-media-text-track-container {
+            bottom: 5% !important;
+            transform: none !important;
+          }
+          video::cue {
+            background: rgba(14, 12, 22, 0.88) !important;
+            color: #ffffff !important;
+            font-size: clamp(16px, 2.2vw, 24px) !important;
+            border-radius: 6px !important;
+            padding: 4px 10px !important;
+          }
+          :fullscreen video::cue {
+            font-size: clamp(24px, 2.8vw, 36px) !important;
+          }
         </style>
         <script>
           window.open = function() { console.log('[AdBlock] Blocked popup'); return null; };
